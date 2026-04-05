@@ -17,6 +17,7 @@ export default function Recommend() {
   const [method, setMethod] = useState('user');
   const [topN, setTopN] = useState(10);
   const [metrics, setMetrics] = useState(null);
+  const [hasRequested, setHasRequested] = useState(false);
   const { popup, close } = usePopup();
   const rec = useRecommendations();
 
@@ -34,6 +35,7 @@ export default function Recommend() {
   }, [userId]);
 
   const run = async () => {
+    setHasRequested(true);
     await rec.getRecommendations(userId, method, topN);
   };
 
@@ -63,6 +65,11 @@ export default function Recommend() {
 
       <div className="col-lg-6">
         <ResultsPanel results={rec.results} />
+        {hasRequested && !rec.loading && !rec.error && rec.results.length === 0 ? (
+          <div className="empty-state mt-3">
+            No unseen movies left for this user – try another user or add new movies.
+          </div>
+        ) : null}
       </div>
 
       <div className="col-lg-3">

@@ -4,15 +4,18 @@ from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Query, Request
+from sqlalchemy import desc, func, select
 
 from app.api.errors import InsufficientRatingsError, ModelNotReadyError, UserNotFoundError
 from app.api.schemas import RecommendationRequest, RecommendationResponse
 from app.config import settings
+from app.db import SessionLocal
 from app.models.collaborative import (
     item_based_recommendations,
     predict_user_movie_score,
     user_based_recommendations,
 )
+from app.models.rating import Rating
 from app.utils.metrics import mae, precision_recall_at_k, rmse
 from app.utils.visualizer import heatmap_sample
 
@@ -56,13 +59,16 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
         "Ranking & Filtering Recommendations...",
     ]
 
+    top_n = min(payload.top_n, settings.max_recs)
+    seen_movies = set(user_movie.loc[payload.user_id].dropna().index.astype(int).tolist())
+
     if payload.method == "user":
         recs = user_based_recommendations(
             user_id=payload.user_id,
             user_movie_matrix=user_movie,
             user_similarity=engine["user_similarity"],
             movies_df=engine["movies"],
-            top_n=payload.top_n,
+            top_n=top_n,
             k=settings.top_k_neighbors,
         )
     else:
@@ -71,13 +77,50 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
             user_movie_matrix=user_movie,
             item_similarity=engine["item_similarity"],
             movies_df=engine["movies"],
-            top_n=payload.top_n,
+            top_n=top_n,
         )
+
+    if not recs:
+        movies_lookup = engine["movies"].set_index("movieId")
+        with SessionLocal() as db:
+            pop = db.execute(
+                select(Rating.movie_id, func.avg(Rating.rating).label("score"))
+                .group_by(Rating.movie_id)
+                .order_by(desc("score"))
+                .limit(settings.max_recs * 3)
+            ).all()
+
+        fallback = []
+        for movie_id, score in pop:
+            movie_id = int(movie_id)
+            if movie_id in seen_movies:
+                continue
+            title = (
+                movies_lookup.at[movie_id, "title"]
+                if movie_id in movies_lookup.index
+                else f"Movie {movie_id}"
+            )
+            genres = (
+                movies_lookup.at[movie_id, "genres"]
+                if movie_id in movies_lookup.index
+                else "Unknown"
+            )
+            fallback.append(
+                {
+                    "movieId": movie_id,
+                    "title": title,
+                    "genres": genres,
+                    "score": round(float(score), 4),
+                }
+            )
+            if len(fallback) >= top_n:
+                break
+        recs = fallback
 
     for rec in recs:
         rec["poster_url"] = _poster_placeholder(rec["title"])
 
-    return {"recommendations": recs, "steps": steps}
+    return {"recommendations": recs[:top_n], "steps": steps}
 
 
 @router.get("/movies")

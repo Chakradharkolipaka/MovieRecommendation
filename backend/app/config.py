@@ -18,11 +18,13 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "Movie Recommender API")
     cors_origins: list[str] = None
     min_ratings_user: int = int(os.getenv("MIN_RATINGS_USER", "5"))
-    min_ratings_movie: int = int(os.getenv("MIN_RATINGS_MOVIE", "10"))
+    min_ratings_movie: int = int(os.getenv("MIN_RATINGS_MOVIE", "3"))
     default_top_n: int = int(os.getenv("DEFAULT_TOP_N", "10"))
     top_k_neighbors: int = int(os.getenv("TOP_K_NEIGHBORS", "10"))
+    max_recs: int = int(os.getenv("MAX_RECS", "10"))
     page_size: int = int(os.getenv("PAGE_SIZE", "20"))
     tmdb_api_key: str | None = os.getenv("TMDB_API_KEY")
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./movie_recommender.db")
 
     def __post_init__(self) -> None:
         if self.cors_origins is None:
@@ -34,3 +36,4 @@ class Settings:
 
 
 settings = Settings()
+

@@ -6,7 +6,7 @@ from app.models.similarity import cosine_item_similarity, pearson_user_similarit
 
 def _build_context():
     movies, ratings, _ = load_movielens()
-    filtered = filter_ratings(ratings, min_ratings_user=5, min_ratings_movie=10)
+    filtered = filter_ratings(ratings, min_ratings_user=5, min_ratings_movie=3)
     matrix = build_user_movie_matrix(filtered)
     normalized = normalize_by_user_mean(matrix)
     user_sim = pearson_user_similarity(normalized)
@@ -19,12 +19,14 @@ def test_pearson_diagonal_is_one():
     assert float(user_sim.iloc[0, 0]) == 1.0
 
 
-def test_user_based_recommendations_schema():
+def test_user_based_recommendations_excludes_seen_movies():
     movies, matrix, user_sim, _ = _build_context()
+    seen_movies = set(matrix.loc[1].dropna().index.astype(int).tolist())
     recs = user_based_recommendations(1, matrix, user_sim, movies, top_n=3, k=5)
     assert isinstance(recs, list)
     if recs:
         assert {"movieId", "title", "genres", "score"}.issubset(recs[0].keys())
+        assert recs[0]["movieId"] not in seen_movies
 
 
 def test_item_based_recommendations_list():

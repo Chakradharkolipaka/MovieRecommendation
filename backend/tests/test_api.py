@@ -1,8 +1,14 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+import app.api.routes as routes
+from app.data.load_data import init_db, load_csv_data
+from app.main import build_engine
 
 
+init_db()
+load_csv_data()
+app.state.engine = build_engine()
 client = TestClient(app)
 
 
@@ -27,3 +33,13 @@ def test_recommend_endpoint_ok():
     body = res.json()
     assert "recommendations" in body
     assert "steps" in body
+    assert len(body["recommendations"]) > 0
+
+
+def test_recommend_fallback_when_cf_returns_empty(monkeypatch):
+    monkeypatch.setattr(routes, "user_based_recommendations", lambda **_: [])
+    payload = {"user_id": 1, "method": "user", "top_n": 5}
+    res = client.post("/api/recommend", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data["recommendations"]) > 0

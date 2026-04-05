@@ -43,8 +43,19 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python -m scripts.generate_sparse_ratings  # optional: increase sparsity from dense samples
 uvicorn app.main:app --reload --port 8000
 ```
+
+The backend expects dataset files at:
+
+- `backend/app/data/movielens/movies.csv`
+- `backend/app/data/movielens/ratings.csv`
+
+To use official MovieLens small data (recommended):
+
+1. Download from `https://files.grouplens.org/datasets/movielens/ml-latest-small.zip`
+2. Extract and copy `movies.csv` and `ratings.csv` into `backend/app/data/movielens/`
 
 ### Frontend
 
@@ -67,6 +78,13 @@ cd backend
 pytest -q
 ```
 
+## One-liner run flow
+
+```bash
+cd backend && source .venv/bin/activate && uvicorn app.main:app --reload
+cd frontend && npm run dev
+```
+
 ## UX highlights
 
 - Step-by-step modal pipeline popup with progress
@@ -83,5 +101,6 @@ pytest -q
 
 ## Notes
 
-- The repository includes a compact sample MovieLens-like CSV so the app runs out of the box.
-- Replace files in `backend/app/data/movielens/` with `ml-latest-small` for production-like behavior.
+- The repository includes a sparse sample ratings matrix so recommendations are available out of the box.
+- SQLAlchemy tables (`movies`, `ratings`) are auto-created on backend startup and loaded from CSV on first run.
+- SQLite is used by default for free-tier local/demo simplicity.
