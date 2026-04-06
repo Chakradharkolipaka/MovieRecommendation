@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import re
+import time
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import desc, func, select
 
 from app.api.errors import InsufficientRatingsError, ModelNotReadyError, UserNotFoundError
-from app.api.schemas import RecommendationRequest, RecommendationResponse
+from app.api.schemas import RateRequest, RecommendationRequest, RecommendationResponse
 from app.config import settings
 from app.db import SessionLocal
 from app.models.collaborative import (
+    build_explanation,
     item_based_recommendations,
+    pre_filter_candidates,
     predict_user_movie_score,
     user_based_recommendations,
 )
 from app.models.rating import Rating
+from app.utils.tmdb import enrich_recommendations_with_posters
 from app.utils.metrics import mae, precision_recall_at_k, rmse
 from app.utils.visualizer import heatmap_sample
 
@@ -33,14 +38,66 @@ def _poster_placeholder(title: str) -> str:
     return f"https://placehold.co/320x480/12121a/e50914?text={title[:25].replace(' ', '+')}&font=roboto"
 
 
+def _extract_year(title: str) -> int | None:
+    match = re.search(r"\((\d{4})\)", str(title))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _top_user_genres(user_id: int, ratings_df: pd.DataFrame, movies_df: pd.DataFrame, top_n: int = 3) -> list[str]:
+    user_rows = ratings_df[ratings_df["userId"] == user_id]
+    merged = user_rows.merge(movies_df[["movieId", "genres"]], on="movieId", how="left")
+    counts: dict[str, int] = {}
+    for cell in merged["genres"].fillna(""):
+        for genre in str(cell).split("|"):
+            if not genre:
+                continue
+            counts[genre] = counts.get(genre, 0) + 1
+    return [g for g, _ in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]]
+
+
+def _refresh_dirty_user(engine: dict[str, Any], user_id: int) -> None:
+    ratings = engine["ratings"]
+    user_movie = engine["user_movie"].copy()
+
+    if user_id not in user_movie.index:
+        user_movie.loc[user_id] = pd.Series(dtype=float)
+
+    user_rows = ratings[ratings["userId"] == user_id]
+    for movie_id in user_movie.columns:
+        match = user_rows[user_rows["movieId"] == movie_id]
+        user_movie.loc[user_id, movie_id] = float(match.iloc[-1]["rating"]) if not match.empty else float("nan")
+
+    normalized = user_movie.sub(user_movie.mean(axis=1), axis=0)
+    user_similarity = normalized.T.corr(method="pearson", min_periods=2)
+    matrix = user_movie.fillna(0)
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    item_sim = cosine_similarity(matrix.T)
+    item_similarity = pd.DataFrame(item_sim, index=matrix.columns, columns=matrix.columns)
+
+    engine["user_movie"] = user_movie
+    engine["normalized"] = normalized
+    engine["user_similarity"] = user_similarity
+    engine["item_similarity"] = item_similarity
+
+
 @router.get("/health")
 def healthcheck() -> dict:
     return {"status": "ok"}
 
 
 @router.post("/recommend", response_model=RecommendationResponse)
-def recommend(payload: RecommendationRequest, request: Request) -> dict:
+async def recommend(payload: RecommendationRequest, request: Request) -> dict:
     engine = _engine(request)
+
+    dirty_users = getattr(request.app.state, "dirty_users", set())
+    if payload.user_id in dirty_users or payload.force_refresh:
+        _refresh_dirty_user(engine, payload.user_id)
+        if payload.user_id in dirty_users:
+            dirty_users.remove(payload.user_id)
+
     user_movie = engine["user_movie"]
     ratings = engine["ratings"]
 
@@ -51,12 +108,28 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
     if rating_count < settings.min_ratings_user:
         raise InsufficientRatingsError("This user hasn't rated enough movies yet.")
 
+    movies_df = engine["movies"].copy()
+    movies_df["year"] = movies_df["title"].map(_extract_year)
+    agg = ratings.groupby("movieId")["rating"].agg(avg_rating="mean", rating_count="count").reset_index()
+    movies_df = movies_df.merge(agg, on="movieId", how="left")
+
+    candidate_movies = pre_filter_candidates(
+        movies_df=movies_df,
+        moods=payload.moods,
+        era_start=payload.era_start,
+        era_end=payload.era_end,
+        runtime=payload.runtime,
+        rating_floor=payload.rating_floor,
+        min_vote_count=payload.min_vote_count,
+        language=payload.language,
+    )
+
     steps = [
-        "Loading user rating history...",
-        "Building User-Movie Matrix...",
-        "Calculating Pearson Correlations...",
-        "Finding Top-K Similar Users..." if payload.method == "user" else "Finding Similar Movies...",
-        "Ranking & Filtering Recommendations...",
+        "Loading your taste profile...",
+        "Applying mood + era filters...",
+        "Computing similarity scores...",
+        "Fetching movie posters...",
+        "Building your recommendations...",
     ]
 
     top_n = min(payload.top_n, settings.max_recs)
@@ -67,7 +140,7 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
             user_id=payload.user_id,
             user_movie_matrix=user_movie,
             user_similarity=engine["user_similarity"],
-            movies_df=engine["movies"],
+            movies_df=candidate_movies,
             top_n=top_n,
             k=settings.top_k_neighbors,
         )
@@ -76,12 +149,12 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
             user_id=payload.user_id,
             user_movie_matrix=user_movie,
             item_similarity=engine["item_similarity"],
-            movies_df=engine["movies"],
+            movies_df=candidate_movies,
             top_n=top_n,
         )
 
     if not recs:
-        movies_lookup = engine["movies"].set_index("movieId")
+        movies_lookup = movies_df.set_index("movieId")
         with SessionLocal() as db:
             pop = db.execute(
                 select(Rating.movie_id, func.avg(Rating.rating).label("score"))
@@ -111,16 +184,92 @@ def recommend(payload: RecommendationRequest, request: Request) -> dict:
                     "title": title,
                     "genres": genres,
                     "score": round(float(score), 4),
+                    "similarity_score": round(min(max(float(score) / 5.0, 0.0), 1.0), 4),
                 }
             )
             if len(fallback) >= top_n:
                 break
         recs = fallback
 
+    user_genres = _top_user_genres(payload.user_id, ratings, movies_df)
+    similar_users = []
+    if payload.user_id in engine["user_similarity"].index:
+        sims = (
+            engine["user_similarity"]
+            .loc[payload.user_id]
+            .drop(index=payload.user_id, errors="ignore")
+            .dropna()
+            .sort_values(ascending=False)
+            .head(settings.top_k_neighbors)
+        )
+        similar_users = [(int(uid), float(score)) for uid, score in sims.items()]
+
     for rec in recs:
-        rec["poster_url"] = _poster_placeholder(rec["title"])
+        rec["explanation"] = build_explanation(
+            user_id=payload.user_id,
+            movie_id=int(rec["movieId"]),
+            similar_users=similar_users,
+            ratings_df=ratings,
+            movies_df=movies_df,
+            user_genres=user_genres,
+        )
+
+    recs = await enrich_recommendations_with_posters(recs)
+    for rec in recs:
+        if not rec.get("poster_url"):
+            rec["poster_url"] = _poster_placeholder(rec["title"])
 
     return {"recommendations": recs[:top_n], "steps": steps}
+
+
+@router.post("/rate")
+async def submit_rating(req: RateRequest, request: Request) -> dict:
+    engine = _engine(request)
+
+    if not (0.5 <= req.rating <= 5.0):
+        raise HTTPException(status_code=422, detail="Rating must be between 0.5 and 5.0")
+
+    if req.movie_id not in engine["movies"]["movieId"].astype(int).tolist():
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    if req.user_id not in engine["ratings"]["userId"].astype(int).tolist():
+        raise HTTPException(status_code=404, detail="User session expired. Please re-select.")
+
+    timestamp = int(time.time())
+    new_row = {
+        "userId": int(req.user_id),
+        "movieId": int(req.movie_id),
+        "rating": float(req.rating),
+        "timestamp": timestamp,
+    }
+    engine["ratings"] = pd.concat([engine["ratings"], pd.DataFrame([new_row])], ignore_index=True)
+
+    with SessionLocal() as db:
+        db.add(
+            Rating(
+                user_id=int(req.user_id),
+                movie_id=int(req.movie_id),
+                rating=float(req.rating),
+                timestamp=timestamp,
+            )
+        )
+        db.commit()
+
+    dirty_users = getattr(request.app.state, "dirty_users", None)
+    if dirty_users is None:
+        request.app.state.dirty_users = set()
+        dirty_users = request.app.state.dirty_users
+    dirty_users.add(req.user_id)
+
+    user_count = int(engine["ratings"][engine["ratings"]["userId"] == req.user_id].shape[0])
+    return {
+        "status": "saved",
+        "user_id": req.user_id,
+        "movie_id": req.movie_id,
+        "rating": req.rating,
+        "total_ratings": user_count,
+        "message": f"Rating saved. You've now rated {user_count} movies.",
+    }
 
 
 @router.get("/movies")

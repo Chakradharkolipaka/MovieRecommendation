@@ -43,3 +43,24 @@ def test_recommend_fallback_when_cf_returns_empty(monkeypatch):
     assert res.status_code == 200
     data = res.json()
     assert len(data["recommendations"]) > 0
+
+
+def test_rate_endpoint_success_sets_dirty_user():
+    payload = {"user_id": 1, "movie_id": 30, "rating": 4.0}
+    res = client.post("/api/rate", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "saved"
+    assert 1 in app.state.dirty_users
+
+
+def test_rate_endpoint_rejects_out_of_range_rating():
+    payload = {"user_id": 1, "movie_id": 10, "rating": 7.0}
+    res = client.post("/api/rate", json=payload)
+    assert res.status_code == 422
+
+
+def test_rate_endpoint_unknown_user():
+    payload = {"user_id": 9999, "movie_id": 10, "rating": 4.0}
+    res = client.post("/api/rate", json=payload)
+    assert res.status_code == 404

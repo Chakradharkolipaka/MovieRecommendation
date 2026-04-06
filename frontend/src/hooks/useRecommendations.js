@@ -20,10 +20,37 @@ export function useRecommendations() {
   const setRecommendations = useAppStore((s) => s.setRecommendations);
   const popup = usePopup();
 
-  const getRecommendations = async (userId, method, topN) => {
+  const getRecommendations = async (params) => {
+    const {
+      userId,
+      method,
+      topN,
+      moods,
+      ageGroup,
+      eraStart,
+      eraEnd,
+      runtime,
+      ratingFloor,
+      minVoteCount,
+      language,
+      forceRefresh,
+    } = params;
     setState((s) => ({ ...s, loading: true, error: null, currentStep: 0 }));
     try {
-      const response = await fetchRecommendations({ userId, method, topN });
+      const response = await fetchRecommendations({
+        userId,
+        method,
+        topN,
+        moods,
+        ageGroup,
+        eraStart,
+        eraEnd,
+        runtime,
+        ratingFloor,
+        minVoteCount,
+        language,
+        forceRefresh,
+      });
       popup.showStep(response.steps);
 
       for (let i = 0; i < response.steps.length; i += 1) {

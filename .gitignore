@@ -11,9 +11,12 @@ backend/movie_recommender.db
 # Env files
 .env
 *.env
+.env.local
+*.env.local
 !.env.example
 
 # Editor / OS
 .vscode/
 .idea/
 .DS_Store
+.vercel

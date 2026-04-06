@@ -51,3 +51,4 @@ def startup_event() -> None:
     init_db()
     load_csv_data()
     app.state.engine = build_engine()
+    app.state.dirty_users = set()
